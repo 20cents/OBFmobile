@@ -41,6 +41,7 @@ var Layout = Marionette.LayoutView.extend({
     //'submit form#form-picture': 'uploadPhoto',
     'click .capture-photo-js': 'capturePhoto'
   },
+
   initialize: function() {
     this.user = User.getCurrent();
     this.observationModel = this.model;
@@ -72,7 +73,6 @@ var Layout = Marionette.LayoutView.extend({
 
   onRender: function() {
     console.log('onRender');
-
     this.$el.attr('data-cid', this.cid);
 
     var isSaved = (this.observationModel.get('missionId') && this.observationModel.get('departementId'));
@@ -302,10 +302,9 @@ var Layout = Marionette.LayoutView.extend({
     if (errors)
       return false;
 
-    if (this.$el.hasClass('form-status-unsaved'))
+    if (this.$el.hasClass('form-status-unsaved')) {
       this.saveObs();
-
-    if (navigator.onLine) {
+    } else if ( navigator.onLine ) {
       if (this.$el.hasClass('form-status-shared-0'))
         this.sendObs();
       else if (this.$el.hasClass('form-status-shared-1'))
@@ -395,7 +394,7 @@ var Layout = Marionette.LayoutView.extend({
 
     self.$el.addClass('sending');
     this.$el.find('form').addClass('loading');
-    Main.getInstance().blockUI();
+    //Main.getInstance().blockUI();
 
     //clear data photos
     var clearPhoto = function(args) {
@@ -493,11 +492,11 @@ var Layout = Marionette.LayoutView.extend({
       },
       success: function(response) {
         self.observationModel.set({
-          'externId': response.nid,
-          'shared': 1
+          'externId': response.nid
+          //'shared': 1
         }).save().done(function() {
           self.session.updateUser().done(function(response){
-            self.sendPhotos();
+            self.uploadPhotos();
           });
         });
       }
@@ -508,45 +507,44 @@ var Layout = Marionette.LayoutView.extend({
     });
   },
 
-
-  sendPhotos: function() {
+  uploadPhotos: function() {
     var self = this;
     // var user = User.getCurrent();
 
     if (window.cordova) {
-      var nbPhoto = (this.observationModel.get('photos').length) - 1;
+      var photos = this.observationModel.get('photos');
       var dfds = [];
-      this.observationModel.get('photos').forEach(function(photo) {
-        var uploadDfd = self.uploadPhotoMob(photo.url);
-        dfds.push(uploadDfd);
+      photos.forEach(function(photo) {
+        var dfd = self.uploadPhoto(photo.url);
+        dfds.push(dfd);
+        /*dfd.progress(function(data) {
+          if ( data == 'progress' && !isStarted ) {
+            self.onUploadPhotosStart(dfds);
+          }
+        });*/
       });
-      $.when.apply($, dfds).progress(function() {
-        var resolvedFiles = _.filter(arguments, {type: 'fileResolved'});
-        if ( resolvedFiles.length == dfds.length )
-          self.startProgress(dfds);
-      });
-      $.when.apply($, dfds).done(function(response) {
-        Main.getInstance().unblockUI();
-        self.$el.removeClass('sending');
-        self.$el.find('form').removeClass('loading');
-        self.$el.find('form').removeClass('progressing');
 
-        /*self.observationModel.set({
-          'shared': 1
-        }).save();*/
-        var nbCompleted = this.user.get('completedMissions').length;
-        Main.getInstance().addDialog({
-          cssClass: 'theme-primary with-bg-forest user-score',
-          badgeClassNames: 'badge-circle bg-wood border-brown text-white',
-          badge: nbCompleted + '<div class="text-xs text-bottom">' + i18n.t('mission.label', {
-            count: nbCompleted
-          }) + '</div>',
-          title: i18n.t('dialogs.obsShared.title'),
-          message: i18n.t('dialogs.obsShared.message'),
-          button: i18n.t('dialogs.obsShared.button')
+      var isStarted = false;
+      _.forEach(dfds, function(dfd) {
+        dfd.progress(function(data) {
+          if ( !isStarted && data == 'progress' ) {
+            isStarted = true;
+            self.onUploadPhotosStart(dfds);
+          }
         });
-        self.setFormStatus('shared');
-        this.user.computeScore();
+      });
+
+      this.listenToOnce(Router.getInstance(), 'route', function(name, args){
+        _.forEach(dfds, function(dfd) {
+          if ( dfd.jqxhr )
+            dfd.jqxhr.abort();
+          else
+            dfd.reject();
+        });
+      });
+
+      $.when.apply($, dfds).done(function(response) {
+        self.onPhotosUploaded(response);
       });
     } else {
       Main.getInstance().unblockUI();
@@ -572,31 +570,69 @@ var Layout = Marionette.LayoutView.extend({
     }
   },
 
-  startProgress: function(dfds) {
-    if ( this.isUploadProgress )
-      return false;
-    this.isUploadProgress = true;
+  onUploadPhotosStart: function(dfds) {
+    var self = this;
+    console.log('onPhotosStart');
     this.$el.find('form').addClass('progressing');
-    console.log('startProgress');
     _.forEach(dfds, function(dfd) {
       dfd.progress(function(data) {
-        console.log('progress notify', data);
+        if ( data == 'progress' ) {
+          var loaded = 0;
+          var total = 0;
+          _.forEach(dfds, function(dfd) {
+            loaded += (dfd.bytesLoaded || 0);
+            total += dfd.bytesTotal;
+          });
+          self.onUploadPhotosProgress(loaded, total);
+        }
       });
     });
   },
 
-  uploadPhotoMob: function(f) {
+  onUploadPhotosProgress: function(loaded, total) {
+    var percent = Math.round((loaded/total)*100)+'%';
+    this.$el.find('.progress-bar').css({
+      width: percent
+    }).text(percent);
+  },
+
+  onPhotosUploaded: function() {
+    var self = this;
+    //stop listen router
+    self.stopListening(Router.getInstance());
+
+    //Main.getInstance().unblockUI();
+    self.$el.removeClass('sending');
+    self.$el.find('form').removeClass('loading');
+    self.$el.find('form').removeClass('progressing');
+
+    /*self.observationModel.set({
+      'shared': 1
+    }).save();*/
+    var nbCompleted = this.user.get('completedMissions').length;
+    Main.getInstance().addDialog({
+      cssClass: 'theme-primary with-bg-forest user-score',
+      badgeClassNames: 'badge-circle bg-wood border-brown text-white',
+      badge: nbCompleted + '<div class="text-xs text-bottom">' + i18n.t('mission.label', {
+        count: nbCompleted
+      }) + '</div>',
+      title: i18n.t('dialogs.obsShared.title'),
+      message: i18n.t('dialogs.obsShared.message'),
+      button: i18n.t('dialogs.obsShared.button')
+    });
+    //self.setFormStatus('shared');
+    this.user.computeScore();
+},
+
+  uploadPhoto: function(f) {
     var self = this;
     var dfd = $.Deferred();
+    dfd.bytesTotal = 0;
 
     /* jshint ignore:start */
     window.resolveLocalFileSystemURL(f, function(fe) {
       fe.file(function(file) {
-        dfd.notify({
-          type: 'fileResolved',
-          data: file
-        });
-        var fileSize = file.size;
+        dfd.bytesTotal = file.size;
         var reader = new FileReader();
         reader.onloadend = function(e) {
           var data = new Uint8Array(e.target.result);
@@ -616,11 +652,8 @@ var Layout = Marionette.LayoutView.extend({
             xhr: function() {
               var xhr = new window.XMLHttpRequest();
               xhr.upload.addEventListener('progress', function(e) {
-                console.log('progress event', e);
-                dfd.notify({
-                  type: 'progress',
-                  data: e
-                });
+                dfd.bytesLoaded = e.loaded;
+                dfd.notify('progress');
               }, false);
 
               return xhr;
@@ -631,14 +664,15 @@ var Layout = Marionette.LayoutView.extend({
             },
             error: function(error) {
               console.log(error);
-              Dialog.alert({
+              /*Dialog.alert({
                 closable: true,
                 message: error.responseJSON
-              });
+              });*/
             }
           };
           self.session.getCredentials(query).then(function() {
-            $.ajax(query);
+            if ( dfd.state() != 'rejected' )
+              dfd.jqxhr = $.ajax(query);
           });
         };
         reader.readAsArrayBuffer(file);
